@@ -4,11 +4,14 @@ import 'dart:math' show max, min;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:medplus/services/notification_service.dart';
 import 'package:medplus/pages/history/history_screen.dart';
 import 'package:medplus/services/auth_service.dart';
 import 'package:medplus/services/blood_pressure_socket.dart';
-import 'package:medplus/services/medical_record_service.dart';
 import 'package:medplus/theme/app_colors.dart';
+import 'package:medplus/widgets/chat_widget.dart';
+import 'package:medplus/pages/logs/symptoms_logs_screen.dart';
 
 class Homescreen extends StatefulWidget {
   const Homescreen({super.key});
@@ -29,7 +32,7 @@ class _HomescreenState extends State<Homescreen> {
   // State
   bool _isInitializing = false;
   bool _isConnected = false;
-    String? _errorMessage;
+  String? _errorMessage;
 
   // Data
   BloodPressureReading? _latestReading;
@@ -42,6 +45,8 @@ class _HomescreenState extends State<Homescreen> {
   final List<FlSpot> _diastolicData = [];
   double _minY = 50;
   double _maxY = 200;
+  DateTime? _lastCriticalAlertAt;
+  static const Duration _criticalAlertCooldown = Duration(seconds: 10);
 
   @override
   void initState() {
@@ -66,7 +71,10 @@ class _HomescreenState extends State<Homescreen> {
     try {
       final token = await _getTokenWithRetry();
       if (token == null || token.isEmpty) {
-        _showErrorDialog('Authentication Error', 'Please log in again to continue');
+        _showErrorDialog(
+          'Authentication Error',
+          'Please log in again to continue',
+        );
         return;
       }
 
@@ -90,33 +98,42 @@ class _HomescreenState extends State<Homescreen> {
         });
       });
 
-      _readingsSub = _bpSocket!.readingsStream.listen((reading) {
-        if (!mounted) return;
-        setState(() {
-          _latestReading = reading;
-          _recentReadings.add(reading);
-          if (_recentReadings.length > 100) _recentReadings.removeAt(0);
-          _updateGraphData(reading);
-          // Update min/max
-          _minY = min(_minY, (reading.diastolic * 0.9).floorToDouble());
-          _maxY = max(_maxY, (reading.systolic * 1.1).ceilToDouble());
+      _readingsSub = _bpSocket!.readingsStream.listen(
+        (reading) {
+          if (!mounted) return;
+          setState(() {
+            _latestReading = reading;
+            _recentReadings.add(reading);
+            if (_recentReadings.length > 100) _recentReadings.removeAt(0);
+            _updateGraphData(reading);
+            // Update min/max
+            _minY = min(_minY, (reading.diastolic * 0.9).floorToDouble());
+            _maxY = max(_maxY, (reading.systolic * 1.1).ceilToDouble());
 
-          // Simple alert example
-          if (reading.systolic >= 180 || reading.diastolic >= 120) {
-            _alerts.add('CRITICAL: ${reading.systolic}/${reading.diastolic} mmHg at ${reading.timestamp}');
-          }
-        });
-      }, onError: (e) {
-        if (!mounted) return;
-        setState(() => _errorMessage = e.toString());
-      });
+            // Simple alert example
+            if (reading.systolic >= 180 || reading.diastolic >= 120) {
+              _alerts.add(
+                'CRITICAL: ${reading.systolic}/${reading.diastolic} mmHg at ${reading.timestamp}',
+              );
+              _triggerCriticalAlert(reading);
+            }
+          });
+        },
+        onError: (e) {
+          if (!mounted) return;
+          setState(() => _errorMessage = e.toString());
+        },
+      );
 
-      _messageSub = _bpSocket!.messageStream.listen((message) {
-        // Optional: handle other misc messages from server
-      }, onError: (e) {
-        if (!mounted) return;
-        setState(() => _errorMessage = 'Connection error: $e');
-      });
+      _messageSub = _bpSocket!.messageStream.listen(
+        (message) {
+          // Optional: handle other misc messages from server
+        },
+        onError: (e) {
+          if (!mounted) return;
+          setState(() => _errorMessage = 'Connection error: $e');
+        },
+      );
 
       await _bpSocket!.connect();
       await _loadMedicalRecords();
@@ -134,6 +151,50 @@ class _HomescreenState extends State<Homescreen> {
         });
       }
     }
+  }
+
+  void _triggerCriticalAlert(BloodPressureReading reading) {
+    final now = DateTime.now();
+    if (_lastCriticalAlertAt != null &&
+        now.difference(_lastCriticalAlertAt!) < _criticalAlertCooldown) {
+      return;
+    }
+    _lastCriticalAlertAt = now;
+
+    // Play system alert sound and strong haptic feedback (best-effort cross-platform)
+    SystemSound.play(SystemSoundType.alert);
+    HapticFeedback.heavyImpact();
+
+    // Show an in-app high-visibility dialog
+    if (!mounted) return;
+    // Fire a system notification as well
+    NotificationService.instance.showCriticalNotification(
+      title: 'Critical BP Alert',
+      body: 'Reading: ${reading.systolic}/${reading.diastolic} mmHg',
+    );
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text(
+            'Critical Blood Pressure Alert',
+            style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+          ),
+          content: Text(
+            'Reading: ${reading.systolic}/${reading.diastolic} mmHg' +
+                (reading.pulse != null ? '\nPulse: ${reading.pulse} bpm' : ''),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _cleanupSocket() async {
@@ -160,17 +221,21 @@ class _HomescreenState extends State<Homescreen> {
         final token = await AuthService.getToken();
         if (token != null && token.isNotEmpty) return token;
       } catch (e) {
-        debugPrint('Get token failed (attempt ${attempts + 1}/$maxRetries): $e');
+        debugPrint(
+          'Get token failed (attempt ${attempts + 1}/$maxRetries): $e',
+        );
         if (attempts == maxRetries - 1) rethrow;
       }
       await Future.delayed(Duration(milliseconds: 500 * (attempts + 1)));
       attempts++;
     }
     return null;
-    }
+  }
 
   void _updateGraphData(BloodPressureReading reading) {
-    final double x = _systolicData.isNotEmpty ? _systolicData.last.x + 1.0 : 0.0;
+    final double x = _systolicData.isNotEmpty
+        ? _systolicData.last.x + 1.0
+        : 0.0;
     final double systolic = reading.systolic.toDouble();
     final double diastolic = reading.diastolic.toDouble();
 
@@ -216,7 +281,7 @@ class _HomescreenState extends State<Homescreen> {
   }
 
   void _onItemTapped(int index) {
-    if (index == 1) {
+    if (index == 2) {
       Navigator.push(
         context,
         MaterialPageRoute(builder: (context) => const HistoryScreen()),
@@ -258,7 +323,8 @@ class _HomescreenState extends State<Homescreen> {
           debugPrint('Error fetching patient records: $e');
           if (mounted) {
             setState(() {
-              _errorMessage = 'Failed to load your medical records. Please try again.';
+              _errorMessage =
+                  'Failed to load your medical records. Please try again.';
             });
           }
         }
@@ -266,8 +332,9 @@ class _HomescreenState extends State<Homescreen> {
         // For doctors, we don't load records until a patient is selected
         if (mounted) {
           setState(() {
-            _errorMessage = 'Please select a patient to view their medical records';
-// Clear any existing records
+            _errorMessage =
+                'Please select a patient to view their medical records';
+            // Clear any existing records
           });
         }
       } else {
@@ -277,17 +344,18 @@ class _HomescreenState extends State<Homescreen> {
       debugPrint('Error in _loadMedicalRecords: $e\n$st');
       if (mounted) {
         setState(() {
-          _errorMessage = 'An error occurred while loading data. Please try again.';
+          _errorMessage =
+              'An error occurred while loading data. Please try again.';
         });
       }
     } finally {
       if (mounted) {
         setState(() {
-// Make sure to set loading to false when done
+          // Make sure to set loading to false when done
         });
       }
     }
-}
+  }
 
   void _showErrorDialog(String title, String message) {
     if (!mounted) return;
@@ -316,56 +384,149 @@ class _HomescreenState extends State<Homescreen> {
 
   Widget _buildBloodPressureChart() {
     return Card(
-      elevation: 4,
+      elevation: 6,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Container(
-        height: 300,
+        height: 320,
         padding: const EdgeInsets.all(16.0),
-        child: LineChart(
-          LineChartData(
-            gridData: FlGridData(show: true),
-            titlesData: FlTitlesData(
-              bottomTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  getTitlesWidget: (value, meta) => Text('${value.toInt()}'),
-                ),
-              ),
-              leftTitles: AxisTitles(
-                sideTitles: SideTitles(
-                  showTitles: true,
-                  getTitlesWidget: (value, meta) => Text('${value.toInt()}'),
-                ),
-              ),
-              topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-              rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _buildLegendDot(Colors.red, 'Systolic'),
+                const SizedBox(width: 12),
+                _buildLegendDot(Colors.blue, 'Diastolic'),
+              ],
             ),
-            borderData: FlBorderData(show: true),
-            minX: 0,
-            maxX: _systolicData.isNotEmpty ? _systolicData.length - 1 : 0,
-            minY: _minY,
-            maxY: _maxY,
-            lineBarsData: [
-              LineChartBarData(
-                spots: _systolicData,
-                isCurved: true,
-                color: Colors.red,
-                barWidth: 3,
-                dotData: const FlDotData(show: false),
-                belowBarData: BarAreaData(show: false),
+            const SizedBox(height: 12),
+            Expanded(
+              child: LineChart(
+                LineChartData(
+                  lineTouchData: LineTouchData(
+                    enabled: true,
+                    touchTooltipData: LineTouchTooltipData(
+                      tooltipBgColor: Colors.black.withOpacity(0.7),
+                      fitInsideHorizontally: true,
+                      fitInsideVertically: true,
+                    ),
+                  ),
+                  gridData: FlGridData(
+                    show: true,
+                    drawVerticalLine: true,
+                    horizontalInterval: 20,
+                    getDrawingHorizontalLine: (value) => FlLine(
+                      color: Colors.grey.withOpacity(0.2),
+                      strokeWidth: 1,
+                    ),
+                    getDrawingVerticalLine: (value) => FlLine(
+                      color: Colors.grey.withOpacity(0.12),
+                      strokeWidth: 1,
+                    ),
+                  ),
+                  titlesData: FlTitlesData(
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 22,
+                        getTitlesWidget: (value, meta) => Text(
+                          '${value.toInt()}',
+                          style: const TextStyle(fontSize: 10),
+                        ),
+                      ),
+                    ),
+                    leftTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 32,
+                        interval: 20,
+                        getTitlesWidget: (value, meta) => Text(
+                          '${value.toInt()}',
+                          style: const TextStyle(fontSize: 10),
+                        ),
+                      ),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                  ),
+                  borderData: FlBorderData(
+                    show: true,
+                    border: Border.all(color: Colors.grey.withOpacity(0.2)),
+                  ),
+                  minX: 0,
+                  maxX: _systolicData.isNotEmpty ? _systolicData.length - 1 : 0,
+                  minY: _minY,
+                  maxY: _maxY,
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: _systolicData,
+                      isCurved: true,
+                      gradient: const LinearGradient(
+                        colors: [Colors.redAccent, Colors.red],
+                      ),
+                      barWidth: 3,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.red.withOpacity(0.25),
+                            Colors.transparent,
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                    ),
+                    LineChartBarData(
+                      spots: _diastolicData,
+                      isCurved: true,
+                      gradient: const LinearGradient(
+                        colors: [Colors.lightBlueAccent, Colors.blue],
+                      ),
+                      barWidth: 3,
+                      dotData: const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        gradient: LinearGradient(
+                          colors: [
+                            Colors.blue.withOpacity(0.20),
+                            Colors.transparent,
+                          ],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              LineChartBarData(
-                spots: _diastolicData,
-                isCurved: true,
-                color: Colors.blue,
-                barWidth: 3,
-                dotData: const FlDotData(show: false),
-                belowBarData: BarAreaData(show: false),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
+    );
+  }
+
+  Widget _buildLegendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 12, color: Colors.black87),
+        ),
+      ],
     );
   }
 
@@ -390,11 +551,11 @@ class _HomescreenState extends State<Homescreen> {
     return 'High';
   }
 
-  Widget _buildDivider() => Container(width: 1, height: 40, color: Colors.grey[300]);
+  Widget _buildDivider() =>
+      Container(width: 1, height: 40, color: Colors.grey[300]);
 
   Widget _buildHomeScreen() {
-    return SingleChildScrollView(
-      physics: const AlwaysScrollableScrollPhysics(),
+    return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -405,7 +566,9 @@ class _HomescreenState extends State<Homescreen> {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
               side: BorderSide(
-                color: _isConnected ? Colors.green.shade100 : Colors.red.shade100,
+                color: _isConnected
+                    ? Colors.green.shade100
+                    : Colors.red.shade100,
                 width: 2,
               ),
             ),
@@ -416,7 +579,9 @@ class _HomescreenState extends State<Homescreen> {
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: _isConnected ? Colors.green.shade50 : Colors.red.shade50,
+                      color: _isConnected
+                          ? Colors.green.shade50
+                          : Colors.red.shade50,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
@@ -431,8 +596,13 @@ class _HomescreenState extends State<Homescreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          _isConnected ? 'Connected' : (_isInitializing ? 'Connecting...' : 'Disconnected'),
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          _isConnected
+                              ? 'Connected'
+                              : (_isInitializing
+                                    ? 'Connecting...'
+                                    : 'Disconnected'),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(
                                 color: _isConnected ? Colors.green : Colors.red,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -442,11 +612,10 @@ class _HomescreenState extends State<Homescreen> {
                           _latestReading != null
                               ? 'Last update: ${_latestReading!.timestamp.toLocal().toString().substring(0, 19)}'
                               : _isConnected
-                                  ? 'Waiting for data...'
-                                  : 'Not connected',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: Colors.grey[600],
-                              ),
+                              ? 'Waiting for data...'
+                              : 'Not connected',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: Colors.grey[600]),
                         ),
                       ],
                     ),
@@ -458,7 +627,10 @@ class _HomescreenState extends State<Homescreen> {
                       label: const Text('Retry'),
                       style: TextButton.styleFrom(
                         foregroundColor: Theme.of(context).primaryColor,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
                       ),
                     )
                   else if (_isInitializing)
@@ -477,7 +649,9 @@ class _HomescreenState extends State<Homescreen> {
           // Current reading
           Card(
             elevation: 4,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
             child: Padding(
               padding: const EdgeInsets.all(20.0),
               child: Column(
@@ -490,10 +664,10 @@ class _HomescreenState extends State<Homescreen> {
                       Text(
                         'BLOOD PRESSURE',
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              color: Colors.grey[600],
-                              letterSpacing: 1.2,
-                              fontWeight: FontWeight.bold,
-                            ),
+                          color: Colors.grey[600],
+                          letterSpacing: 1.2,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ],
                   ),
@@ -506,14 +680,20 @@ class _HomescreenState extends State<Homescreen> {
                               'Systolic',
                               _latestReading!.systolic.toString(),
                               'mmHg',
-                              _getPressureStatus(_latestReading!.systolic, true),
+                              _getPressureStatus(
+                                _latestReading!.systolic,
+                                true,
+                              ),
                             ),
                             _buildDivider(),
                             _buildReadingColumn(
                               'Diastolic',
                               _latestReading!.diastolic.toString(),
                               'mmHg',
-                              _getPressureStatus(_latestReading!.diastolic, false),
+                              _getPressureStatus(
+                                _latestReading!.diastolic,
+                                false,
+                              ),
                             ),
                             _buildDivider(),
                             _buildReadingColumn(
@@ -529,9 +709,16 @@ class _HomescreenState extends State<Homescreen> {
                           child: Center(
                             child: Column(
                               children: [
-                                Icon(Icons.timelapse, size: 40, color: Colors.grey),
+                                Icon(
+                                  Icons.timelapse,
+                                  size: 40,
+                                  color: Colors.grey,
+                                ),
                                 SizedBox(height: 8),
-                                Text('Waiting for data...', style: TextStyle(color: Colors.grey)),
+                                Text(
+                                  'Waiting for data...',
+                                  style: TextStyle(color: Colors.grey),
+                                ),
                               ],
                             ),
                           ),
@@ -543,63 +730,87 @@ class _HomescreenState extends State<Homescreen> {
 
           const SizedBox(height: 20),
 
-          const Text('Blood Pressure Trend', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 10),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: _systolicData.isNotEmpty ? _buildBloodPressureChart() : const Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Center(child: Text('Waiting for data...')),
-              ),
-            ),
+          const Text(
+            'Blood Pressure Trend',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
+          const SizedBox(height: 10),
+          _systolicData.isNotEmpty
+              ? _buildBloodPressureChart()
+              : Card(
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: const SizedBox(
+                    height: 120,
+                    child: Center(child: Text('Waiting for data...')),
+                  ),
+                ),
 
           if (_alerts.isNotEmpty) ...[
             const SizedBox(height: 20),
             Text(
               'ALERTS',
               style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: Colors.grey[600],
-                    letterSpacing: 1.2,
-                    fontWeight: FontWeight.bold,
-                  ),
+                color: Colors.grey[600],
+                letterSpacing: 1.2,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             const SizedBox(height: 8),
-            ..._alerts.map((alert) => Card(
-                  elevation: 2,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: BorderSide(
-                      color: alert.contains('CRITICAL') ? Colors.red.shade200 : Colors.orange.shade200,
-                      width: 1,
+            ..._alerts.map(
+              (alert) => Card(
+                elevation: 2,
+                margin: const EdgeInsets.only(bottom: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(
+                    color: alert.contains('CRITICAL')
+                        ? Colors.red.shade200
+                        : Colors.orange.shade200,
+                    width: 1,
+                  ),
+                ),
+                child: ListTile(
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: alert.contains('CRITICAL')
+                          ? Colors.red.shade50
+                          : Colors.orange.shade50,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      alert.contains('CRITICAL')
+                          ? Icons.warning_amber_rounded
+                          : Icons.info_outline_rounded,
+                      color: alert.contains('CRITICAL')
+                          ? Colors.red
+                          : Colors.orange,
                     ),
                   ),
-                  child: ListTile(
-                    leading: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: alert.contains('CRITICAL') ? Colors.red.shade50 : Colors.orange.shade50,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        alert.contains('CRITICAL') ? Icons.warning_amber_rounded : Icons.info_outline_rounded,
-                        color: alert.contains('CRITICAL') ? Colors.red : Colors.orange,
-                      ),
-                    ),
-                    title: Text(alert, style: const TextStyle(fontWeight: FontWeight.w500)),
-                    trailing: Icon(Icons.chevron_right, color: Colors.grey[400]),
-                    onTap: () {},
+                  title: Text(
+                    alert,
+                    style: const TextStyle(fontWeight: FontWeight.w500),
                   ),
-                )),
+                  trailing: Icon(Icons.chevron_right, color: Colors.grey[400]),
+                  onTap: () {},
+                ),
+              ),
+            ),
           ],
         ],
       ),
     );
   }
 
-  Widget _buildReadingColumn(String label, String value, String unit, String status) {
+  Widget _buildReadingColumn(
+    String label,
+    String value,
+    String unit,
+    String status,
+  ) {
     Color statusColor = Colors.grey;
     if (status == 'High' || status == 'Low') {
       statusColor = Colors.orange;
@@ -636,7 +847,11 @@ class _HomescreenState extends State<Homescreen> {
                 ),
                 child: Text(
                   status,
-                  style: TextStyle(color: statusColor, fontSize: 10, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ],
@@ -646,14 +861,20 @@ class _HomescreenState extends State<Homescreen> {
     );
   }
 
+  // Add the chat widget that will float above all other content
+  Widget _buildChatWidget() {
+    return const ChatWidget();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('MedPlus'),
+        backgroundColor: const Color.fromARGB(255, 113, 158, 255),
+        title: const Text('Sahara', style: TextStyle(color: Colors.white)),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh, color: Colors.white),
             onPressed: _isInitializing
                 ? null
                 : () async {
@@ -663,27 +884,56 @@ class _HomescreenState extends State<Homescreen> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () => Future.wait([_initSocket(), _loadMedicalRecords()]),
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          child: Column(
-            children: [
-              _buildHomeScreen(),
-              if (_errorMessage != null && !_isConnected)
-                Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text('Connection Status: $_errorMessage', style: const TextStyle(color: Colors.red)),
+      body: _selectedIndex == 1
+          ? const SymptomsLogsScreen()
+          : Stack(
+              children: [
+                RefreshIndicator(
+                  onRefresh: () =>
+                      Future.wait([_initSocket(), _loadMedicalRecords()]),
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Column(
+                      children: [
+                        _buildHomeScreen(),
+                        if (_errorMessage != null && !_isConnected)
+                          Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Text(
+                              'Connection Status: $_errorMessage',
+                              style: const TextStyle(color: Colors.red),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-            ],
-          ),
-        ),
-      ),
+                // Floating chat widget overlay
+                _buildChatWidget(),
+              ],
+            ),
       bottomNavigationBar: BottomNavigationBar(
         items: const <BottomNavigationBarItem>[
-          BottomNavigationBarItem(icon: Icon(Icons.home_outlined), activeIcon: Icon(Icons.home), label: 'Home'),
-        BottomNavigationBarItem(icon: Icon(Icons.history_outlined), activeIcon: Icon(Icons.history), label: 'History'),
-          BottomNavigationBarItem(icon: Icon(Icons.person_outline), activeIcon: Icon(Icons.person), label: 'Profile'),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home),
+            label: 'Home',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.description_outlined),
+            activeIcon: Icon(Icons.description),
+            label: 'Symptoms Logs',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.history_outlined),
+            activeIcon: Icon(Icons.history),
+            label: 'History',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person_outline),
+            activeIcon: Icon(Icons.person),
+            label: 'Profile',
+          ),
         ],
         currentIndex: _selectedIndex,
         selectedItemColor: AppColors.primary,
@@ -711,20 +961,42 @@ class _HomescreenState extends State<Homescreen> {
                   CircleAvatar(
                     radius: 30,
                     backgroundColor: Colors.white,
-                    child: Icon(Icons.person, size: 40, color: AppColors.primary),
+                    child: Icon(
+                      Icons.person,
+                      size: 40,
+                      color: AppColors.primary,
+                    ),
                   ),
                   SizedBox(height: 10),
-                  Text('Welcome', style: TextStyle(color: Colors.white, fontSize: 16)),
-                  Text('User', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+                  Text(
+                    'Welcome',
+                    style: TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                  Text(
+                    'User',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ],
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.calendar_today, color: AppColors.primary),
+              leading: const Icon(
+                Icons.calendar_today,
+                color: AppColors.primary,
+              ),
               title: const Text('Appointments'),
               onTap: () {
                 Navigator.pop(context);
-                Navigator.push(context, MaterialPageRoute(builder: (context) => const HistoryScreen()));
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const HistoryScreen(),
+                  ),
+                );
               },
             ),
             ListTile(

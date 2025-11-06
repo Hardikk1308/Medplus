@@ -1,3 +1,7 @@
+// lib/models/auth_models.dart
+import 'package:flutter/foundation.dart';
+
+@immutable
 class SignupRequest {
   final String email;
   final String username;
@@ -6,7 +10,7 @@ class SignupRequest {
   final String role;
   final String? doctorId;
 
-  SignupRequest({
+  const SignupRequest({
     required this.email,
     required this.username,
     required this.password,
@@ -20,6 +24,7 @@ class SignupRequest {
       'email': email,
       'username': username,
       'password': password,
+      // use snake_case if your FastAPI/Pydantic backend expects it
       'full_name': fullName,
       'role': role,
       if (role == 'patient' && doctorId != null) 'doctor_id': doctorId,
@@ -27,23 +32,43 @@ class SignupRequest {
   }
 }
 
+@immutable
 class AuthResponse {
   final String accessToken;
+  final String tokenType; // often "bearer"
   final User user;
 
-  AuthResponse({
+  const AuthResponse({
     required this.accessToken,
+    required this.tokenType,
     required this.user,
   });
 
   factory AuthResponse.fromJson(Map<String, dynamic> json) {
+    // accept snake_case or camelCase
+    final token = (json['access_token'] ?? json['accessToken'] ?? '').toString();
+    final type = (json['token_type'] ?? json['tokenType'] ?? 'bearer').toString();
+
+    final userJson = json['user'];
+    if (userJson is! Map) {
+      throw const FormatException('AuthResponse.user missing or not an object');
+    }
+
     return AuthResponse(
-      accessToken: json['access_token'],
-      user: User.fromJson(json['user']),
+      accessToken: token,
+      tokenType: type,
+      user: User.fromJson(userJson.cast<String, dynamic>()),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'access_token': accessToken,
+        'token_type': tokenType,
+        'user': user.toJson(),
+      };
 }
 
+@immutable
 class User {
   final String id;
   final String email;
@@ -53,9 +78,9 @@ class User {
   final bool isActive;
   final bool isVerified;
   final String authProvider;
-  final DateTime createdAt;
+  final DateTime? createdAt;
 
-  User({
+  const User({
     required this.id,
     required this.email,
     required this.username,
@@ -68,16 +93,35 @@ class User {
   });
 
   factory User.fromJson(Map<String, dynamic> json) {
+    // accept both snake_case and camelCase fields from backend
+    final created = json['created_at'] ?? json['createdAt'];
+    DateTime? createdAt;
+    if (created != null) {
+      createdAt = DateTime.tryParse(created.toString());
+    }
+
     return User(
-      id: json['id'],
-      email: json['email'],
-      username: json['username'],
-      fullName: json['full_name'] ?? '',
-      role: json['role'],
-      isActive: json['is_active'] ?? false,
-      isVerified: json['is_verified'] ?? false,
-      authProvider: json['auth_provider'] ?? 'email',
-      createdAt: DateTime.parse(json['created_at']),
+      id: (json['id'] ?? json['_id'] ?? '').toString(),
+      email: (json['email'] ?? '').toString(),
+      username: (json['username'] ?? '').toString(),
+      fullName: (json['full_name'] ?? json['fullName'] ?? '').toString(),
+      role: (json['role'] ?? '').toString(),
+      isActive: (json['is_active'] ?? json['isActive'] ?? false) == true,
+      isVerified: (json['is_verified'] ?? json['isVerified'] ?? false) == true,
+      authProvider: (json['auth_provider'] ?? json['authProvider'] ?? 'email').toString(),
+      createdAt: createdAt,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'email': email,
+        'username': username,
+        'full_name': fullName, // switch to 'fullName' if your API expects camelCase
+        'role': role,
+        'is_active': isActive,
+        'is_verified': isVerified,
+        'auth_provider': authProvider,
+        if (createdAt != null) 'created_at': createdAt!.toIso8601String(),
+      };
 }

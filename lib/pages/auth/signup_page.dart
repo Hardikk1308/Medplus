@@ -121,13 +121,22 @@ class _SignupPageState extends State<SignupPage> {
     try {
       if (!mounted) return;
 
-      await Future.delayed(const Duration(seconds: 2));
-      if (!mounted) return;
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const Homescreen()),
+      // Call the AuthService.signup method
+      await AuthService.signup(
+        email: _emailController.text.trim(),
+        username: _usernameController.text.trim(),
+        password: _passwordController.text,
+        fullName: _fullNameController.text.trim(),
+        role: 'patient', // Default role, adjust as needed
+        doctorId: _selectedDoctorId,
       );
+
+      // If we get here, signup was successful and token is stored
+      if (!mounted) return;
+      
+      // Navigate to home screen
+      Navigator.pushReplacementNamed(context, '/home');
+      
     } catch (e) {
       if (!mounted) return;
 
@@ -138,18 +147,23 @@ class _SignupPageState extends State<SignupPage> {
         errorMessage = 'This username is already taken';
       } else if (e.toString().toLowerCase().contains('network')) {
         errorMessage = 'Network error. Please check your connection';
+      } else {
+        // Add more specific error handling if needed
+        errorMessage = e.toString();
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(errorMessage),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
-        ),
-      );
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _isLoading = false);
