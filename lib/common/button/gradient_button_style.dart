@@ -32,7 +32,12 @@ class GradientElevatedButton extends StatelessWidget {
         boxShadow: [
           // Subtle shadow to enhance the "elevated" look
           BoxShadow(
-            color: gradientColors.first.withOpacity(0.2),
+            color: Color.fromRGBO(
+              (gradientColors.first.r * 255).round() & 0xff,
+              (gradientColors.first.g * 255).round() & 0xff,
+              (gradientColors.first.b * 255).round() & 0xff,
+              0.2,
+            ),
             blurRadius: 10.0,
             offset: const Offset(0, 5),
           ),

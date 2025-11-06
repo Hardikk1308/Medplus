@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:medplus/auth/login.dart';
+// import 'package:medplus/auth/login.dart';
 // import 'package:flutter_svg/flutter_svg.dart';
 import 'package:medplus/models/onboard.dart';
+import 'package:medplus/pages/auth/login_page.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 // import 'onboarding_contents.dart'; // Import the model file
 
@@ -75,7 +76,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                           curve: Curves.easeIn,
                         );
                       } else {
-                        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const Loginscreen()));
+                        Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => const LoginPage()));
                         // print("Onboarding Complete!");
                       }
                     },
