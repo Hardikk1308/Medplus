@@ -133,7 +133,7 @@ class AuthService {
     if (token == null) return null;
 
     if (isTokenExpired(token)) {
-      await logout();
+      // Avoid auto-logout; let caller decide re-auth flow
       return null;
     }
 
@@ -159,7 +159,7 @@ class AuthService {
         await prefs.setString(_userKey, jsonEncode(user.toJson()));
         return user;
       } else if (response.statusCode == 401) {
-        await logout();
+        // Avoid auto-logout on a single /me 401; surface null and let UI handle
         return null;
       } else {
         return null;
@@ -208,7 +208,7 @@ class AuthService {
     if (token == null || token.isEmpty) return false;
 
     if (isTokenExpired(token)) {
-      await logout();
+      // Avoid auto-logout here; simply report not logged in
       return false;
     }
     return true;
@@ -222,7 +222,7 @@ class AuthService {
       final token = prefs.getString(_tokenKey);
 
       if (token != null && isTokenExpired(token)) {
-        await logout();
+        // Avoid auto-logout when token is expired; return null to trigger re-auth
         return null;
       }
       return token;
@@ -243,10 +243,17 @@ class AuthService {
 
   static bool isTokenExpired(String token) {
     try {
-      return JwtDecoder.isExpired(token);
-    } catch (e) {
-      debugPrint('Error checking token expiration: $e');
-      return true; // If parse fails, treat as expired
+      final claims = JwtDecoder.decode(token);
+      final dynamic exp = claims['exp'];
+      if (exp is int) {
+        final expTime = DateTime.fromMillisecondsSinceEpoch(exp * 1000);
+        return expTime.isBefore(DateTime.now());
+      }
+      // If no exp claim, assume not expired (opaque tokens or non-standard JWTs)
+      return false;
+    } catch (_) {
+      // If decode fails, assume not expired to avoid false logouts; 401s will surface naturally
+      return false;
     }
   }
 
@@ -254,9 +261,13 @@ class AuthService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      return JwtDecoder.getExpirationDate(token);
-    } catch (e) {
-      debugPrint('Error getting token expiration: $e');
+      final claims = JwtDecoder.decode(token);
+      final dynamic exp = claims['exp'];
+      if (exp is int) {
+        return DateTime.fromMillisecondsSinceEpoch(exp * 1000);
+      }
+      return null;
+    } catch (_) {
       return null;
     }
   }

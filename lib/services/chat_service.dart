@@ -5,8 +5,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:medplus/services/auth_service.dart';
 
 class ChatService {
-  static const String _baseUrl =
-      'https://multistratified-puppyishly-latrina.ngrok-free.dev';
   static const String _chatCreateEndpoint = '/chat/create';
   static const String _chatQueryEndpoint = '/chat';
 
@@ -27,7 +25,7 @@ class ChatService {
     if (token == null || token.isEmpty) {
       throw Exception('Not authenticated. Please log in again.');
     }
-    final url = Uri.parse('$_baseUrl$_chatCreateEndpoint');
+    final url = Uri.parse('${AuthService.baseUrl}$_chatCreateEndpoint');
     debugPrint('ChatService: POST $url');
 
     final response = await http.post(
@@ -35,6 +33,7 @@ class ChatService {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token',
+        'Connection': 'close',
       },
       body: jsonEncode({
         'name': "Sarthak",
@@ -57,8 +56,12 @@ class ChatService {
       }
       return data;
     } else if (response.statusCode == 401) {
-      debugPrint('ChatService: createChat unauthorized (401)');
-      await AuthService.logout();
+      final body = response.body;
+      debugPrint(
+        'ChatService: createChat unauthorized (401) body: '
+        '${body.length > 200 ? body.substring(0, 200) : body}',
+      );
+      // Do not auto-logout here; let the UI handle re-auth flow gracefully
       throw Exception('Session expired. Please log in again.');
     } else {
       final body = response.body;
@@ -89,20 +92,29 @@ class ChatService {
       final dynamicId = newChat['id'] ?? newChat['chat_id'];
       if (dynamicId is String && dynamicId.isNotEmpty) {
         currentChatId = dynamicId;
-        await prefs.setString('chat_id', currentChatId!);
+        await prefs.setString('chat_id', currentChatId);
       } else {
         throw Exception('Chat creation succeeded but no chat_id was returned');
       }
     }
 
-    final url = Uri.parse('$_baseUrl$_chatQueryEndpoint/$currentChatId/query');
+    final url = Uri.parse(
+      '${AuthService.baseUrl}$_chatQueryEndpoint/$currentChatId/query',
+    );
 
+    // Emit token diagnostics to help track 401s
+    final tokenExp = await AuthService.getTokenExpiration();
     debugPrint('ChatService: POST $url');
+    debugPrint(
+      'ChatService: token starts with: ${token.substring(0, 10)}... '
+      'exp: ${tokenExp?.toIso8601String()}',
+    );
     final response = await http.post(
       url,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token',
+        'Connection': 'close',
       },
       body: jsonEncode({'query': message}),
     );
@@ -111,8 +123,12 @@ class ChatService {
       debugPrint('ChatService: sendMessage success (200)');
       return jsonDecode(response.body);
     } else if (response.statusCode == 401) {
-      debugPrint('ChatService: sendMessage unauthorized (401)');
-      await AuthService.logout();
+      final body = response.body;
+      debugPrint(
+        'ChatService: sendMessage unauthorized (401) body: '
+        '${body.length > 200 ? body.substring(0, 200) : body}',
+      );
+      // Do not auto-logout here; let the UI handle re-auth flow gracefully
       throw Exception('Session expired. Please log in again.');
     } else {
       final body = response.body;

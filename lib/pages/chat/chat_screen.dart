@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:medplus/services/chat_service.dart';
 import 'package:medplus/widgets/chat_bubble.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({Key? key}) : super(key: key);
@@ -15,6 +16,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<Map<String, dynamic>> _messages = [];
   bool _isLoading = false;
   bool _canSend = false;
+  late final stt.SpeechToText _speech;
+  bool _speechAvailable = false;
+  bool _isListening = false;
 
   @override
   void dispose() {
@@ -26,12 +30,58 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _speech = stt.SpeechToText();
+    _initSpeech();
     _messageController.addListener(() {
       final canSendNow = _messageController.text.trim().isNotEmpty && !_isLoading;
       if (canSendNow != _canSend) {
         setState(() => _canSend = canSendNow);
       }
     });
+  }
+
+  Future<void> _initSpeech() async {
+    final available = await _speech.initialize(
+      onError: (e) => debugPrint('Speech init error: $e'),
+      onStatus: (s) => debugPrint('Speech status: $s'),
+    );
+    if (!mounted) return;
+    setState(() {
+      _speechAvailable = available;
+    });
+  }
+
+  Future<void> _startListening() async {
+    if (!_speechAvailable || _isListening) return;
+    setState(() => _isListening = true);
+    await _speech.listen(
+      onResult: (result) {
+        final words = result.recognizedWords.trim();
+        if (words.isNotEmpty) {
+          _messageController.text = words;
+          _messageController.selection = TextSelection.fromPosition(
+            TextPosition(offset: _messageController.text.length),
+          );
+        }
+        if (result.finalResult && words.isNotEmpty) {
+          // Auto-send when final result arrives
+          _stopListening();
+          _sendMessage();
+        }
+      },
+      listenMode: stt.ListenMode.confirmation,
+      pauseFor: const Duration(seconds: 3),
+      partialResults: true,
+      cancelOnError: true,
+      localeId: null,
+    );
+  }
+
+  Future<void> _stopListening() async {
+    if (!_isListening) return;
+    await _speech.stop();
+    if (!mounted) return;
+    setState(() => _isListening = false);
   }
 
   void _scrollToBottom() {
@@ -165,9 +215,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: Row(
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.attach_file),
-                          onPressed: () {},
-                          tooltip: 'Attach',
+                          icon: Icon(_isListening ? Icons.mic : Icons.mic_none),
+                          color: _isListening ? Theme.of(context).colorScheme.primary : null,
+                          onPressed: _speechAvailable
+                              ? () => _isListening ? _stopListening() : _startListening()
+                              : null,
+                          tooltip: _isListening ? 'Stop listening' : 'Speak',
                         ),
                         Expanded(
                           child: TextField(

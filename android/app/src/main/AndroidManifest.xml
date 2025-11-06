@@ -2,6 +2,8 @@
 
     <!-- Android 13+ runtime permission for notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Speech to text permission -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:label="Sahara"
